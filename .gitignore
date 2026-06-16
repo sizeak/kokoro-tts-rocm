@@ -1,0 +1,15 @@
+# Generated audio from smoke tests / manual runs
+*.wav
+*.mp3
+*.opus
+*.aac
+*.flac
+
+# Python
+__pycache__/
+*.pyc
+
+# Local overrides (keep the committed .env as the documented template)
+.env.local
+# Machine-local compose tweaks (e.g. HSA override for unsupported GPUs) — not shipped
+docker-compose.override.yml

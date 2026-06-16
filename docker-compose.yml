@@ -1,0 +1,74 @@
+# Kokoro-82M TTS on ROCm.
+#
+# Recommended flow:
+#   1. docker compose --profile download run --rm download   # warm the weights cache (network on, no ports)
+#   2. docker compose up --build -d                          # serve HTTP on 127.0.0.1:8002
+#
+# Host GPU group GIDs (render/video) are injected via group_add. Defaults below
+# match this dev laptop (render=989, video=985); override in .env per host:
+#   echo "RENDER_GID=$(getent group render | cut -d: -f3)"  > .env
+#   echo "VIDEO_GID=$(getent group video | cut -d: -f3)"    >> .env
+
+x-gpu-common: &gpu-common
+  build:
+    context: .
+  # Both services share ONE built image. Without a fixed name, the profiled
+  # `download` service builds its own image that `docker compose build` skips
+  # (profiles are excluded from default commands), leaving it stale.
+  image: kokoro-tts:local
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - "${RENDER_GID:-989}"
+    - "${VIDEO_GID:-985}"
+  ipc: host
+  security_opt:
+    - seccomp:unconfined
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp
+    # ~/.cache must be writable: the ROCm/HIP/MIOpen runtime kernel caches live
+    # here, and on gfx1103 a read-only rootfs turns those failed writes into a
+    # GPU hang. Keeping it a tmpfs preserves the read-only rootfs everywhere else.
+    - /home/appuser/.cache
+  volumes:
+    - kokoro-tts-models:/hf
+  environment:
+    # Unset by default (supported GPUs need no override). Unsupported GPUs like the
+    # Radeon 780M (gfx1103) set this via a local docker-compose.override.yml — see README.
+    HSA_OVERRIDE_GFX_VERSION: "${HSA_OVERRIDE_GFX_VERSION:-}"
+    KOKORO_DEVICE: "${KOKORO_DEVICE:-cuda}"
+    MIOPEN_FIND_MODE: "${MIOPEN_FIND_MODE:-2}"
+    # MIOpen writes a compiled-kernel cache + perf db; default is under $HOME,
+    # which is read-only here. Point both at the writable /tmp tmpfs.
+    MIOPEN_USER_DB_PATH: "${MIOPEN_USER_DB_PATH:-/tmp/miopen}"
+    MIOPEN_CUSTOM_CACHE_DIR: "${MIOPEN_CUSTOM_CACHE_DIR:-/tmp/miopen}"
+    KOKORO_REPO: "${KOKORO_REPO:-hexgrad/Kokoro-82M}"
+    KOKORO_VOICE: "${KOKORO_VOICE:-af_heart}"
+
+services:
+  # The HTTP microservice. Bound to loopback only, so it is not exposed beyond
+  # this host. If the weights are already cached (via the `download` step), the
+  # serving container makes no outbound fetches in steady state.
+  kokoro-tts:
+    <<: *gpu-common
+    ports:
+      - "127.0.0.1:8002:8000"
+
+  # One-shot: download/refresh model + voice weights into the volume, then exit.
+  # No ports published — its only outbound use is fetching from Hugging Face. Run
+  # this once before serving so the service container never needs the internet.
+  download:
+    <<: *gpu-common
+    profiles: ["download"]
+    command: >
+      python -c "import os; from kokoro import KModel, KPipeline;
+      m = KModel(repo_id=os.environ['KOKORO_REPO']);
+      KPipeline(lang_code='a', repo_id=os.environ['KOKORO_REPO'], model=m).load_voice(os.environ['KOKORO_VOICE']);
+      print('weights cached for', os.environ['KOKORO_REPO'], os.environ['KOKORO_VOICE'])"
+
+volumes:
+  kokoro-tts-models:
