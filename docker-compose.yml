@@ -36,7 +36,15 @@ x-gpu-common: &gpu-common
     - /home/appuser/.cache
   volumes:
     - kokoro-tts-models:/hf
+    # Small executable tmpfs for TMPDIR (see the espeak-tmp volume below).
+    - espeak-tmp:/run/espeak
   environment:
+    # misaki's espeak fallback (phonemises out-of-dictionary words like
+    # "taskwarrior") copies libespeak-ng.so to a temp dir and dlopen()s it,
+    # which fails on the noexec /tmp — leaving OOV words silently dropped from
+    # the speech. Point TMPDIR at the small *exec* tmpfs so it can load, while
+    # /tmp stays noexec for everything else.
+    TMPDIR: "/run/espeak"
     # Unset by default (supported GPUs need no override). Unsupported GPUs like the
     # Radeon 780M (gfx1103) set this via a local docker-compose.override.yml — see README.
     HSA_OVERRIDE_GFX_VERSION: "${HSA_OVERRIDE_GFX_VERSION:-}"
@@ -72,3 +80,12 @@ services:
 
 volumes:
   kokoro-tts-models:
+  # An executable in-memory tmpfs used as TMPDIR. /tmp is mounted noexec for
+  # hardening, but espeak's lib copy must be mappable as code — this small exec
+  # tmpfs is the one place that's allowed.
+  espeak-tmp:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "exec,nosuid,nodev,size=64m"
